@@ -11,7 +11,7 @@ from telebot import types
 import requests
 from flask import Flask, request, abort
 # ---- helpers: safe int casting (avoid .isdigit on non-strings) ----
-
+from config import BOT_TOKEN
 def to_int(val):
     try:
         return int(str(val).strip())
@@ -995,9 +995,6 @@ def set_webhook():
     except Exception as e:
         print("setWebhook error:", e)
 
-if __name__ == "__main__":
-    print("Bot started with WEBHOOK:", WEBHOOK_URL)
-    set_webhook()
-    # Flask սերվերը՝ Render-ի պահանջած PORT-ից
-    port = int(os.environ.get("PORT", "10000"))
-    app.run(host="0.0.0.0", port=port)
+if name == "main":
+    print("Bot running (polling)…")
+    bot.infinity_polling(skip_pending=True, timeout=10, long_polling_timeout=30)
