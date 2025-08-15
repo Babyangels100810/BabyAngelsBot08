@@ -7,11 +7,15 @@ import datetime
 from datetime import datetime as dt
 import os, json, glob
 import telebot
+import logging
 from telebot import types
 import requests
 from flask import Flask, request, abort
-# ---- helpers: safe int casting (avoid .isdigit on non-strings) ----
 from config import BOT_TOKEN
+from pathlib import Path
+
+MEDIA_DIR = Path(__file__).parent / "media"
+MEDIA_DIR.mkdir(parents=True, exist_ok=True)
 def to_int(val):
     try:
         return int(str(val).strip())
@@ -23,6 +27,15 @@ def to_int(val):
 TOKEN = "7198636747:AAEUNsaiMZXweWcLZoQcxocZKKLhxapCszM"  # եթե արդեն վերևում ունես, սա պահիր նույնը
 ADMIN_ID = 6822052289
 admin_list = [ADMIN_ID]
+
+import requests
+
+def delete_webhook():
+    try:
+        requests.get(f"https://api.telegram.org/bot{BOT_TOKEN}/deleteWebhook", timeout=10)
+        print("Webhook deleted (ok)")
+    except Exception as e:
+        print("deleteWebhook error:", e)
 
 bot = telebot.TeleBot(TOKEN, parse_mode="Markdown")
 
@@ -467,14 +480,47 @@ def invite_friend(message):
 🔗 Ձեր հրավերի հղումը՝  
 {invite_link}
 """)
+# --- compatibility alias: keep old call working ---
+def ensure_first_order_bonus(user_id):
+    """
+    Առաջին մուտքի/պատվերի ժամանակ ակտիվացնում ենք 5% բոնուսը։
+    get_user / save_user՝ քո արդեն գոյություն ունեցող ֆունկցիաներն են։
+    """
+    u = get_user(user_id)
+    # եթե սա առաջին պատվերն է և բոնուսը դեռ չկա՝ ավելացնենք
+    if u.get("orders_count", 0) == 0 and not u.get("first_order_bonus_pct"):
+        u["first_order_bonus_pct"] = 5
+        save_user(user_id, u)
+    return u
 
-@bot.message_handler(commands=["start"])
-def on_start(message):
-    chat_id = message.chat.id
-    user_id = message.from_user.id
 
-    # ակտիվացնենք առաջին գնումի բոնուսը (եթե պետք է)
-    ensure_first_order_bonus(user_id)
+# --- պարզ user storage ---
+users_db = {}
+
+def get_user(user_id):
+    return users_db.get(user_id, {})
+
+def save_user(user_id, user_data):
+    users_db[user_id] = user_data
+
+# --- առաջին պատվերի բոնուս ---
+def ensure_first_order_bonus(user_id):
+    """
+    Առաջին պատվերի բոնուս — 5%
+    """
+    u = get_user(user_id) or {}
+    if u.get("orders_count", 0) == 0 and not u.get("first_order_bonus_pct"):
+        u["first_order_bonus_pct"] = 5
+        save_user(user_id, u)
+    return u
+
+
+
+    # առաջին պատվերի բոնուս (եթե պետք է) — անվտանգ կանչ
+    try:
+        ensure_first_order_bonus(user_id)
+    except Exception as e:
+        print("first_order_bonus error:", e)
 
     # Գլխավոր մենյու
     markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
@@ -486,37 +532,62 @@ def on_start(message):
     markup.add("Հրավիրել ընկերների")
 
     # Հաճախորդի համար / user տվյալներ
-    customer_no = get_next_customer_no()
+    try:
+        customer_no = get_next_customer_no()
+    except NameError:
+        # եթե չունես այդ ֆունկցիան, ուշադիր՝ սա ժամանակավոր fallback է
+        customer_no = users_db.get("_seq", 0) + 1
+        users_db["_seq"] = customer_no
+
     u = get_user(user_id)
     first_bonus_active = (u.get("orders_count", 0) == 0 and not u.get("first_order_bonus_used", False))
     bonus_pct = u.get("first_order_bonus_pct", 5)
 
-    # 📝 մարկետինգային ողջույն (միայն բառերը փոփոխված)
-    top = (
-        "🐰🌸 **Բարի գալուստ BabyAngels** 🛍️\n\n"
-        f"💖 Շնորհակալ ենք, որ ընտրեցիք մեզ ❤️ Դուք արդեն մեր սիրելի հաճախորդն եք՝ **№{customer_no}**։\n\n"
-    )
-    discount = (
-        f"🎁 **Լավ լուր․ առաջին պատվերի համար ունեք {bonus_pct}% զեղչ** — "
-        "կկիրառվի ավտոմատ վճարման պահին։\n\n"
-    ) if first_bonus_active else ""
-    body = (
-        "📦 Ինչ կգտնեք մեզ մոտ՝\n"
-        "• Ժամանակակից ու ոճային ապրանքներ ամեն օր թարմացվող տեսականուց\n"
-        "• Հատուկ ակցիաներ և անակնկալ առաջարկներ\n"
-        "• Անվճար առաքում Հայաստանի ողջ տարածքում\n\n"
-        "💱 Բացի խանութից՝ տրամադրում ենք հուսալի և արագ **փոխարկման ծառայություններ**՝\n"
-        "PI ➜ USDT | FTN ➜ AMD | Alipay ➜ CNY — միշտ շահավետ և արագ 🌟\n\n"
-        "👇 Ընտրեք բաժին և սկսեք գնումները հիմա"
-    )
-    welcome_text = top + discount + body
+# Ֆայլի սկզբում՝ այլ import-ներից հետո
+customer_counter = 1008  # Սկսում ենք 1008-ից
 
-    # Ուղարկում՝ լուսանկարով, եթե կա
+# START command
+@bot.message_handler(commands=['start'])
+def send_welcome(message):
+    global customer_counter
+    customer_counter += 1
+    customer_no = customer_counter
+
+    # Ողջույնի տեքստ (f-string, որ №{customer_no}-ը ճիշտ գրվի)
+    welcome_text = (
+        f"🐰🌸 **Բարի գալուստ BabyAngels** 🛍✨\n\n"
+        f"💖 Շնորհակալ ենք, որ միացել եք մեր սիրելի ընտանիքին ❤️ Դուք արդեն մեր հատուկ հաճախորդն եք՝ **№{customer_no}** ✨\n"
+        f"Մեր նպատակը՝ ամեն այցը դարձնել հաճելի և օգտակար գնումների փորձ։\n\n"
+        f"🎁 **Սկսեք հիմա և ստացեք հատուկ նվեր**\n"
+        f"Ձեր առաջին պատվերի համար մենք անմիջապես տրամադրում ենք **10% զեղչ** 💝 — "
+        f"օգտագործեք և վայելեք առավելագույնը։\n\n"
+        f"📦 **Ի՞նչ կգտնեք այստեղ**\n"
+        f"• Ժամանակակից և օգտակար ապրանքներ՝ ամեն օր թարմացվող ընտրանիով\n"
+        f"• Հատուկ առաջարկներ և բացառիկ զեղչեր միայն մեր Telegram ընտանիքի համար\n"
+        f"• Հարմարավետ և արագ առաքում 🚚\n\n"
+        f"💱 **Փոխարկումներ՝ արագ և հուսալի**\n"
+        f"BabyAngels-ում կարող եք հեշտությամբ կատարել հետևյալ փոխանակումները՝\n"
+        f"- **PI ➜ USDT** (թարմ կուրս, +20% սպասարկում)\n"
+        f"- **FTN ➜ AMD** (միայն 10% սպասարկում)\n"
+        f"- **Alipay լիցքավորում** (1 CNY = 58֏)\n\n"
+        f"✨ **Սկսելու համար՝ պարզապես ընտրեք բաժինը ներքևում** 👇"
+    )
+
+    # ----- սրանից ՎԵՐև already կա քո welcome_text = ( ... ) -----
+
     try:
-        with open("media/bunny.jpg", "rb") as photo:
-            bot.send_photo(chat_id, photo, caption=welcome_text, reply_markup=markup, parse_mode="Markdown")
-    except Exception:        
-        bot.send_message(chat_id, welcome_text, reply_markup=markup, parse_mode="Markdown")
+        p = os.path.join(os.path.dirname(__file__), "media", "bunny.jpg")
+        if os.path.exists(p):
+            with open(p, "rb") as ph:
+                bot.send_photo(
+                    message.chat.id,
+                    ph,
+                    caption=welcome_text
+                )
+        else:
+            bot.send_message(message.chat.id, welcome_text)
+    except Exception:
+        bot.send_message(message.chat.id, welcome_text)
         
 @bot.message_handler(func=lambda m: m.text and m.text.strip().endswith("Խանութ"))
 def open_shop(message):
@@ -950,12 +1021,29 @@ def check_cart_reminders():
                 bot.send_message(user_id, "📌 Մոռացե՞լ եք ձեր զամբյուղի մասին։ Այն դեռ սպասում է ձեզ։🛒")
                 del user_cart_time[user_id]
         time.sleep(600)  # ստուգի ամեն 10 րոպեն մեկ
+# launch background reminder thread
 threading.Thread(target=check_cart_reminders, daemon=True).start()
+
+# health check (for uptime monitors)
+# ---- BEGIN FIX (paste this from ~line 950 to EOF) ----
+
+# ensure Flask app exists even if earlier part didn't run as expected
+try:
+    app
+except NameError:
+    from flask import Flask, request, abort
+    app = Flask(__name__)
+    WEBHOOK_PATH = "/webhook"
+
+# background reminder thread
+threading.Thread(target=check_cart_reminders, daemon=True).start()
+
+# health check
 @app.get("/")
 def health():
     return "ok", 200
 
-# Telegram-ը POST է ուղարկելու հենց այստեղ
+# Telegram webhook (safe to keep even when using polling)
 @app.post(WEBHOOK_PATH)
 def telegram_webhook():
     if request.headers.get("content-type") != "application/json":
@@ -964,29 +1052,15 @@ def telegram_webhook():
     bot.process_new_updates([telebot.types.Update.de_json(update)])
     return "ok", 200
 
-def set_webhook():
-    try:
-        # remove old
-        requests.get(f"https://api.telegram.org/bot{BOT_TOKEN}/deleteWebhook", timeout=10)
-        # set new
-        r = requests.get(
-            f"https://api.telegram.org/bot{BOT_TOKEN}/setWebhook",
-            params={"url": WEBHOOK_URL, "drop_pending_updates": True},
-            timeout=10,
-        )
-        print("setWebhook:", r.json())
-    except Exception as e:
-        print("setWebhook error:", e)
-<<<<<<< HEAD
+# ---- ONLY BLOCK (AT EOF) ----
+telebot.logger.setLevel(logging.WARNING)
 
-if name == "main":
-    print("Bot running (polling)…")
-    bot.infinity_polling(skip_pending=True, timeout=10, long_polling_timeout=30)
-=======
-if name == "main":
-    print("Bot starting with WEBHOOK:", WEBHOOK_URL)
-    set_webhook()
-    port = int(os.environ.get("PORT", "10000"))
-    app.run(host="0.0.0.0", port=port)
-
->>>>>>> 27ecaf196c3758c9802312599c6e4ef3297cae98
+if __name__ == "__main__":
+    delete_webhook()  # պարտադիր polling-ի համար
+    print("Bot is running (polling)...")
+    while True:
+        try:
+            bot.infinity_polling(skip_pending=True, timeout=10, long_polling_timeout=30)
+        except Exception as e:
+            print("Polling error:", e)
+            time.sleep(3)  # 3վ սպասիր ու նորից սկսիր
